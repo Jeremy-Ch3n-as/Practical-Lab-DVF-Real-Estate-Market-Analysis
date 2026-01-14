@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- DVF Project Specific ---
+# Ignorer les données lourdes (Data Lake)
+data_lake/
+warehouse/
+outputs/
+
+# Ignorer les environnements virtuels
+.venv/
+env/
