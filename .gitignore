@@ -210,7 +210,6 @@ __marimo__/
 # Ignorer les données lourdes (Data Lake)
 data_lake/
 warehouse/
-outputs/
 
 # Ignorer les environnements virtuels
 .venv/
