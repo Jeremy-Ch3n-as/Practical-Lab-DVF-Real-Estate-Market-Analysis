@@ -14,51 +14,25 @@ def build_warehouse():
     
     db_path = os.path.join(WAREHOUSE_DIR, "real_estate.duckdb")
     con = duckdb.connect(db_path)
-    
-    print(f"Base de données connectée : {db_path}")
-    
-    print("Chargement de la table 'detail_monthly'...")
-    csv_path_monthly = os.path.join(STAGING_DIR, 'stg_dvf_monthly.csv')
-    
-    try:
-        con.execute(f"""
-            CREATE OR REPLACE TABLE detail_monthly AS 
-            SELECT * FROM read_csv('{csv_path_monthly}', header=True, ignore_errors=True)
-        """)
-        print("-> Table 'detail_monthly' chargée (lignes corrompues ignorées).")
-    except Exception as e:
-        print(f"ERREUR CRITIQUE detail_monthly: {e}")
+    print(f"Base connectée : {db_path}")
+    # Fonction pour charger une table proprement
+    def load_table(table_name, csv_path):
+        if os.path.exists(csv_path):
+            print(f"Chargement de {table_name}...")
+            con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_csv('{csv_path}', auto_detect=True, normalize_names=True)")
+            
+            # Vérifie
+            count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            cols = [c[0] for c in con.execute(f"DESCRIBE {table_name}").fetchall()]
+            print(f"  -> OK : {count} lignes chargées.")
+        else:
+            print(f"  -> ERREUR : Fichier {csv_path} introuvable.")
+    load_table("detail_monthly", os.path.join(STAGING_DIR, "stg_dvf_monthly.csv"))
+    load_table("bi_trends", os.path.join(CURATED_DIR, "cur_france_trends.csv"))
+    load_table("bi_departments", os.path.join(CURATED_DIR, "cur_top_departments.csv"))
 
-    print("Chargement de la table 'bi_trends'...")
-    try:
-        con.execute(f"""
-            CREATE OR REPLACE TABLE bi_trends AS 
-            SELECT * FROM read_csv('{os.path.join(CURATED_DIR, 'cur_france_trends.csv')}', header=True, ignore_errors=True)
-        """)
-    except Exception as e:
-        print(f"Erreur bi_trends: {e}")
-    
-    print("Chargement de la table 'bi_departments'...")
-    try:
-        con.execute(f"""
-            CREATE OR REPLACE TABLE bi_departments AS 
-            SELECT * FROM read_csv('{os.path.join(CURATED_DIR, 'cur_top_departments.csv')}', header=True, ignore_errors=True)
-        """)
-    except Exception as e:
-        print(f"Erreur bi_departments: {e}")
-
-    print("\n--- Validation ---")
-    tables = con.execute("SHOW TABLES").fetchall()
-    print(f"Tables créées avec succès : {tables}")
-    
-    # Vérification du nombre de lignes
-    try:
-        count = con.execute("SELECT COUNT(*) FROM detail_monthly").fetchone()[0]
-        print(f"Nombre total de lignes chargées dans detail_monthly : {count}")
-    except:
-        print("Impossible de compter les lignes.")
-    
     con.close()
+    print("Warehouse terminé.")
 
 if __name__ == "__main__":
     build_warehouse()

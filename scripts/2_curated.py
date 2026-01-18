@@ -1,88 +1,73 @@
 import pandas as pd
 import os
+import numpy as np
 
-# Configuration des chemins
 BASE_DIR = os.getcwd()
 STAGING_DIR = os.path.join(BASE_DIR, "data_lake", "staging")
 CURATED_DIR = os.path.join(BASE_DIR, "data_lake", "curated")
 
 def run_curated():
-    print("--- Démarrage de l'étape CURATED (Version Blindée) ---")
+    print("--- Démarrage de l'étape CURATED ---")
     
     if not os.path.exists(CURATED_DIR):
         os.makedirs(CURATED_DIR)
 
-    # 1. Chargement du Staging
+    # 1. Chargement du fichier propre (Staging)
     csv_path = os.path.join(STAGING_DIR, "stg_dvf_monthly.csv")
     if not os.path.exists(csv_path):
-        print("ERREUR FATALE: Le fichier stg_dvf_monthly.csv n'existe pas !")
+        print("ERREUR : stg_dvf_monthly.csv introuvable.")
         return
-
-    try:
-        # On lit juste les premières lignes pour vérifier les colonnes d'abord, puis tout le fichier
-        df = pd.read_csv(csv_path, low_memory=False)
-        print(f"Données chargées : {len(df)} lignes.")
-        print(f"Colonnes disponibles : {list(df.columns)}")
-    except Exception as e:
-        print(f"Erreur lecture CSV : {e}")
-        return
-
-    # --- INTELLIGENCE DES COLONNES ---
-    # On cherche la colonne date (peut s'appeler 'date_mutation', 'mois', 'date', etc.)
-    col_date = next((c for c in df.columns if 'date' in c or 'mois' in c), None)
-    # On cherche la colonne valeur (peut s'appeler 'valeur_fonciere', 'prix', etc.)
-    col_valeur = next((c for c in df.columns if 'valeur' in c or 'prix' in c or 'montant' in c), None)
-    # On cherche la colonne nombre (peut s'appeler 'nb_mutations', 'nombre', etc.)
-    col_nb = next((c for c in df.columns if 'nb' in c or 'mutations' in c), None)
-    # On cherche la colonne departement
-    col_dept = next((c for c in df.columns if 'dep' in c or 'cod' in c), None)
-
-    print(f"Mapping utilisé -> Date: {col_date} | Valeur: {col_valeur} | Nb: {col_nb} | Dept: {col_dept}")
-
-    # --- Dataset 1 : Évolution Nationale (France Trends) ---
-    print("Génération de cur_france_trends.csv...")
-    if col_date:
-        # On groupe par date. Si 'col_valeur' existe on la somme, sinon on compte juste les lignes.
-        aggs = {}
-        if col_nb: aggs[col_nb] = 'sum'
-        if col_valeur: aggs[col_valeur] = 'mean' # Moyenne des prix
+    df = pd.read_csv(csv_path, low_memory=False)
+    print(f"Données chargées : {len(df)} lignes.")
+    print(f"Colonnes disponibles : {list(df.columns)}")
+    if 'nb_mutations' not in df.columns:
+        print("-> Info : Colonne 'nb_mutations' absente. Calcul automatique (Maison + Appart)...")
         
-        if not aggs: # Si aucune colonne de mesure, on compte juste les lignes
-            df['count'] = 1
-            aggs['count'] = 'sum'
-
+        # On remplace les vides par 0 pour pouvoir additionner
+        col_maison = df['nb_ventes_maison'].fillna(0) if 'nb_ventes_maison' in df.columns else 0
+        col_appart = df['nb_ventes_appartement'].fillna(0) if 'nb_ventes_appartement' in df.columns else 0
+        
+        df['nb_mutations'] = col_maison + col_appart
+    print("Génération de cur_france_trends.csv...")
+    if 'date_mutation' in df.columns:
+        aggs = {}
+        aggs['nb_mutations'] = 'sum'
+        if 'nb_ventes_appartement' in df.columns: aggs['nb_ventes_appartement'] = 'sum'
+        if 'nb_ventes_maison' in df.columns: aggs['nb_ventes_maison'] = 'sum'
+        if 'valeur_fonciere_moyenne' in df.columns: aggs['valeur_fonciere_moyenne'] = 'mean'
+        
+        # GroupBy Date
         try:
-            df_france = df.groupby(col_date).agg(aggs).reset_index()
-            # On renomme pour standardiser
-            df_france.columns = ['date_mutation', 'nb_mutations', 'valeur_fonciere'] if len(df_france.columns) == 3 else ['date_mutation', 'valeur']
-            
-            output_path = os.path.join(CURATED_DIR, "cur_france_trends.csv")
-            df_france.to_csv(output_path, index=False)
-            print(f"-> SUCCÈS : {output_path} créé.")
+            df_trends = df.groupby('date_mutation').agg(aggs).reset_index()
+            # Sauvegarde
+            df_trends.to_csv(os.path.join(CURATED_DIR, "cur_france_trends.csv"), index=False, sep=',', encoding='utf-8-sig')
+            print("-> OK : Tendances temporelles générées.")
         except Exception as e:
-            print(f"Erreur pendant le calcul France Trends : {e}")
+            print(f"ERREUR lors du groupby Trends : {e}")
     else:
-        print("ERREUR : Impossible de trouver une colonne 'Date' pour créer les tendances.")
-
-    # --- Dataset 2 : Top Départements ---
+        print("-> ERREUR : Colonne 'date_mutation' manquante.")
     print("Génération de cur_top_departments.csv...")
-    if col_dept:
+    if 'code_departement' in df.columns:
+        # On prépare l'agrégation
+        agg_dict_dept = {
+            'nb_mutations': 'sum', 
+        }
+        if 'nb_ventes_appartement' in df.columns: agg_dict_dept['nb_ventes_appartement'] = 'sum'
+        if 'nb_ventes_maison' in df.columns: agg_dict_dept['nb_ventes_maison'] = 'sum'
+        if 'libelle_geo' in df.columns: agg_dict_dept['libelle_geo'] = 'first'
+
         try:
-            measure = col_nb if col_nb else col_valeur
-            if not measure:
-                df['count'] = 1
-                measure = 'count'
+            df_dept = df.groupby('code_departement').agg(agg_dict_dept).reset_index()
             
-            df_dept = df.groupby(col_dept)[[measure]].sum().reset_index()
-            df_dept = df_dept.sort_values(by=measure, ascending=False)
-            
-            output_path = os.path.join(CURATED_DIR, "cur_top_departments.csv")
-            df_dept.to_csv(output_path, index=False)
-            print(f"-> SUCCÈS : {output_path} créé.")
+            # Tri par volume total
+            df_dept = df_dept.sort_values(by='nb_mutations', ascending=False)
+            # Sauvegarde
+            df_dept.to_csv(os.path.join(CURATED_DIR, "cur_top_departments.csv"), index=False, sep=',', encoding='utf-8-sig')
+            print("-> OK : Top Départements généré.")
         except Exception as e:
-            print(f"Erreur pendant le calcul Top Dept : {e}")
+             print(f"ERREUR lors du groupby Départements : {e}")
     else:
-        print("ERREUR : Impossible de trouver une colonne 'Département'.")
+        print("-> ERREUR : Colonne 'code_departement' manquante.")
 
 if __name__ == "__main__":
     run_curated()

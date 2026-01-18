@@ -1,84 +1,94 @@
 import duckdb
-import os
 import pandas as pd
+import os
 
-# Configuration affichage
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', 1000)
+
+print("--- ANALYSE BUSINESS INTELLIGENCE (STEP 6) ---")
 
 db_path = os.path.join("warehouse", "real_estate.duckdb")
 con = duckdb.connect(db_path)
 
-def query(title, sql):
-    print(f"\n{'='*60}\n {title}\n{'='*60}")
+def run_query(titre, sql):
+    print(f"\n>>> {titre}")
     try:
-        print(con.execute(sql).df())
+        # On récupère le résultat en DataFrame pandas pour l'affichage
+        df = con.execute(sql).df()
+        print(df)
+        print("-" * 60)
     except Exception as e:
-        print(f"Info: La requête a dû être adaptée ({e}).")
+        print(f"Erreur SQL : {e}")
 
-print("--- ANALYSE IMMOBILIÈRE (ADAPTÉE AUX DONNÉES STATISTIQUES) ---")
-
-# 1. Période (Ça marchait déjà)
-query("1. Période disponible", 
-      "SELECT MIN(date_mutation) as debut, MAX(date_mutation) as fin FROM detail_monthly")
-
-# 3. Volume par type de bien (Au lieu du prix médian impossible à calculer sans raw data)
-# On utilise les colonnes 'nb_ventes_appartement' et 'nb_ventes_maison' si elles existent
-print("\n>>> Tentative d'analyse par Type de Bien (Maison/Appart)")
-
-# On vérifie d'abord les colonnes disponibles
-cols = [c[0] for c in con.execute("DESCRIBE detail_monthly").fetchall()]
-
-sql_type = ""
-if 'nb_ventes_appartement' in cols and 'nb_ventes_maison' in cols:
-    sql_type = """
-        SELECT 
-            SUM(nb_ventes_appartement) as total_ventes_appart,
-            SUM(nb_ventes_maison) as total_ventes_maison
-        FROM detail_monthly
-    """
-    query("3. Volume global par type (Appart vs Maison)", sql_type)
-    
-    # Si on a aussi les prix moyens au m2 (souvent 'prix_m2_moyen_...' dans ces fichiers)
-    if 'prix_moyen_m2_appartement' in cols:
-         query("3b. Prix Moyens m2 (Estimés sur moyennes mensuelles)", """
-            SELECT 
-                AVG(prix_moyen_m2_appartement) as prix_moyen_appart_ref,
-                AVG(prix_moyen_m2_maison) as prix_moyen_maison_ref
-            FROM detail_monthly
-         """)
-else:
-    print("Pas de distinction Maison/Appartement trouvée. On analyse le global.")
-
-# 4. Évolution temporelle (Basé sur le volume global)
-# On utilise 'nb_ventes_local' qui est apparu dans ton erreur
-col_vol = 'nb_ventes_local' if 'nb_ventes_local' in cols else 'nb_mutations'
-
-query("4. Évolution du Volume des Ventes (Derniers mois)", f"""
+# ==============================================================================
+# Q1 & Q2 : Disponibilité des données (Janvier 2026 ?)
+# ==============================================================================
+# On regarde simplement la date min et max présentes dans la base.
+run_query("1 & 2. Période de données disponibles", """
     SELECT 
-        date_mutation, 
-        SUM({col_vol}) as volume_ventes
+        MIN(date_mutation) as date_debut, 
+        MAX(date_mutation) as date_fin 
     FROM detail_monthly
-    GROUP BY date_mutation
-    ORDER BY date_mutation DESC
-    LIMIT 6
 """)
 
-# 5. Top Départements (Activité)
-# On utilise 'code_geo' ou 'code_parent' comme identifiant géo
-col_geo = 'code_departement'
-if 'code_departement' not in cols:
-    # Dans les stats, c'est souvent 'code_geo' ou 'code_parent'
-    if 'code_geo' in cols: col_geo = 'code_geo'
-    elif 'code_parent' in cols: col_geo = 'code_parent'
-
-query("5. Top 10 Zones les plus actives (Volume)", f"""
+# ==============================================================================
+# Q3 : Prix au m2 par type (Appartements vs Maisons)
+# ==============================================================================
+run_query("3. Prix moyen au m2 (Appartements vs Maisons)", """
     SELECT 
-        {col_geo} as code_zone, 
-        SUM({col_vol}) as total_ventes
+        ROUND(AVG(prix_m2_moyen_appartement), 0) as prix_m2_appart,
+        ROUND(AVG(prix_m2_moyen_maison), 0) as prix_m2_maison
     FROM detail_monthly
-    GROUP BY {col_geo}
-    ORDER BY total_ventes DESC
+    WHERE prix_m2_moyen_appartement > 0 AND prix_m2_moyen_maison > 0
+""")
+
+# ==============================================================================
+# Q4 : Évolution des prix (Comparaison Annuelle / Year-over-Year)
+# ==============================================================================
+# J'utilise une CTE (Common Table Expression) pour préparer les données par mois,
+# puis la fonction LAG() pour aller chercher la valeur d'il y a 12 mois.
+run_query("4. Évolution des prix (Comparaison mois N vs N-12)", """
+    WITH stats_globales AS (
+        SELECT 
+            date_mutation,
+            -- On fait une moyenne globale approximative pour voir la tendance
+            AVG(valeur_fonciere_moyenne) as prix_moyen_m2_global
+        FROM detail_monthly
+        GROUP BY date_mutation
+    )
+    SELECT 
+        date_mutation,
+        ROUND(prix_moyen_m2_global, 0) as prix_actuel,
+        -- Récupération du prix 12 lignes (mois) avant
+        ROUND(LAG(prix_moyen_m2_global, 12) OVER (ORDER BY date_mutation), 0) as prix_annee_precedente,
+        -- Calcul du % d'évolution
+        ROUND((prix_moyen_m2_global - LAG(prix_moyen_m2_global, 12) OVER (ORDER BY date_mutation)) 
+              / LAG(prix_moyen_m2_global, 12) OVER (ORDER BY date_mutation) * 100, 2) as evolution_pct
+    FROM stats_globales
+    ORDER BY date_mutation DESC
+    LIMIT 12
+""")
+
+# ==============================================================================
+# Q5 : Top 10 Départements (Transactions & Prix)
+# ==============================================================================
+run_query("5a. Top 10 Départements par Volume de Transactions", """
+    SELECT 
+        code_departement,
+        SUM(nb_mutations) as total_transactions
+    FROM detail_monthly
+    GROUP BY code_departement
+    ORDER BY total_transactions DESC
+    LIMIT 10
+""")
+
+run_query("5b. Top 10 Départements par Prix au m2 (le plus cher)", """
+    SELECT 
+        code_departement,
+        ROUND(AVG(valeur_fonciere_moyenne), 0) as prix_moyen_m2
+    FROM detail_monthly
+    GROUP BY code_departement
+    ORDER BY prix_moyen_m2 DESC
     LIMIT 10
 """)
 
